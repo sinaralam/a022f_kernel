@@ -1,0 +1,234 @@
+name: Build postmarketOS Rootfs (aarch64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ui_interface:
+        description: 'Pilih User Interface (UI)'
+        required: true
+        default: 'phosh'
+        type: choice
+        options:
+          - phosh
+          - xfce4
+          - plasma-mobile
+          - console
+
+jobs:
+  build-rootfs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install pmbootstrap & Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip
+
+          # Install pmbootstrap langsung dari repo Git resmi (Fix error PyPI yanked)
+          # NOTE: postmarketOS sudah rename default branch pmbootstrap dari "master" -> "main"
+          # (lihat: https://postmarketos.org/edge/2026/03/15/pmaports-default-branch-changed/)
+          # Tidak pakai suffix branch sama sekali supaya otomatis ikut default branch repo,
+          # jadi tidak gampang rusak lagi kalau nama default branch berubah lagi nanti.
+          pip3 install --user "git+https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git"
+
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Verify Environment & Kernel File
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          pmbootstrap --version
+
+          if [ ! -f "${GITHUB_WORKSPACE}/boot.img-kernel" ]; then
+            echo "Error: File boot.img-kernel tidak ditemukan di root repository!"
+            exit 1
+          fi
+          echo "boot.img-kernel ditemukan di root repository."
+
+      - name: Prepare Local pmaports + Custom Device Package
+        run: |
+          set -e
+          WORK=/tmp/pmbootstrap
+          APORTS=$WORK/cache_git/pmaports
+          DEVICE_DIR=$APORTS/device/testing/device-samsung-a022f
+          KDIR=$APORTS/device/testing/linux-samsung-a022f
+
+          mkdir -p "$WORK"
+
+          # samsung-a022f BELUM ada di pmaports resmi, jadi kita clone pmaports
+          # dulu secara manual, lalu suntikkan device package kita SENDIRI
+          # sebelum "pmbootstrap init" dijalankan. Dengan begitu pmbootstrap
+          # akan menganggap device ini sudah "ada" (bukan porting baru), dan
+          # wizard init jadi bisa dijawab otomatis (jumlah pertanyaan pasti/pendek).
+          # NOTE: pmaports default branch juga sudah di-rename master -> main
+          # (bareng dengan pmbootstrap, lihat catatan di step sebelumnya).
+          git clone --depth 1 --branch main \
+            https://gitlab.postmarketos.org/postmarketOS/pmaports.git "$APORTS"
+
+          # --- Device package (deviceinfo + APKBUILD referensi ke paket kernel) ---
+          # NOTE: heredoc di-pipe ke `sed` untuk membuang indentasi YAML,
+          # supaya isi file deviceinfo/APKBUILD rapi mulai dari kolom 0.
+          mkdir -p "$DEVICE_DIR"
+          sed 's/^[[:space:]]*//' > "$DEVICE_DIR/deviceinfo" <<'EOF'
+          # TODO: nilai-nilai ini ASUMSI berbasis chipset MediaTek MT6765,
+          # WAJIB dicek ulang sebelum dipakai flash ke unit fisik.
+          deviceinfo_format_version="2"
+          deviceinfo_name="Samsung Galaxy A02"
+          deviceinfo_manufacturer="Samsung"
+          deviceinfo_codename="samsung-a022f"
+          deviceinfo_year="2021"
+          deviceinfo_chassis="handset"
+          deviceinfo_arch="aarch64"
+          deviceinfo_kernel_cmdline=""
+          deviceinfo_generate_bootimg="true"
+          deviceinfo_flash_offset_base="0x00000000"
+          deviceinfo_flash_pagesize="2048"
+          deviceinfo_bootimg_qcdt="false"
+          deviceinfo_bootimg_mtk_mkimage="true"
+          deviceinfo_flash_method="fastboot"
+          EOF
+
+          sed 's/^[[:space:]]*//' > "$DEVICE_DIR/APKBUILD" <<'EOF'
+          pkgname="device-samsung-a022f"
+          pkgver=1
+          pkgrel=0
+          pkgdesc="Samsung Galaxy A02 (SM-A022F)"
+          arch="aarch64"
+          url="https://postmarketos.org"
+          license="MIT"
+          depends="linux-samsung-a022f mkbootimg mesa-dri-swrast"
+          makedepends="devicepkg-dev"
+          subpackages="$pkgname-nonfree-firmware:nonfree_firmware"
+          source="deviceinfo"
+          options="!check !archcheck"
+
+          build() { devicepkg_build $pkgname $_carch; }
+          package() { devicepkg_package $pkgname $_carch; }
+          nonfree_firmware() { devicepkg_subpkg_nonfree_firmware "$pkgname"; }
+
+          sha512sums="SKIP"
+          EOF
+
+          # --- Kernel package: bungkus boot.img-kernel yang sudah jadi, tanpa compile ---
+          mkdir -p "$KDIR"
+          cp "${GITHUB_WORKSPACE}/boot.img-kernel" "$KDIR/boot.img-kernel"
+          sed 's/^[[:space:]]*//' > "$KDIR/APKBUILD" <<'EOF'
+          pkgname="linux-samsung-a022f"
+          pkgver=1
+          pkgrel=0
+          pkgdesc="Samsung Galaxy A02 (SM-A022F) downstream kernel (prebuilt binary)"
+          arch="aarch64"
+          _flavor="samsung-a022f"
+          url="https://postmarketos.org"
+          license="GPL-2.0-only"
+          options="!strip !check !tracedeps pmb:cross-native"
+          subpackages="$pkgname-dev"
+          source="boot.img-kernel"
+
+          build() { :; }
+          package() {
+            install -D "$srcdir"/boot.img-kernel "$pkgdir"/boot/vmlinuz-$_flavor
+            mkdir -p "$pkgdir"/usr/share/kernel/$_flavor
+            echo "$pkgver-postmarketOS" > "$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+          }
+
+          sha512sums="SKIP"
+          EOF
+
+          echo "Device package samsung-a022f (deviceinfo + APKBUILD + kernel) berhasil disiapkan di pmaports lokal."
+
+      - name: Configure pmbootstrap Project
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          WORK=/tmp/pmbootstrap
+          APORTS=$WORK/cache_git/pmaports
+
+          # pmbootstrap 3.x: "init" TIDAK menerima flag --vendor/--device/--channel dst
+          # lagi, murni wizard interaktif. Karena device samsung-a022f sudah kita buat
+          # "ada" di step sebelumnya, urutan pertanyaannya mengikuti pola standar
+          # untuk device existing (ref: dokumentasi resmi pmbootstrap init):
+          #   1. Work path
+          #   2. Channel
+          #   3. Vendor
+          #   4. Device codename
+          #   5. Username
+          #   6. Provider (jika ada _pmb_select, kalau tidak ada prompt ini dilewati)
+          #   7. User interface
+          #   8. Extra packages
+          #   9. Locale
+          #  10. Hostname
+          #  11. Copy SSH public keys? (y/n)
+          #  12. Build outdated packages during install? (y/n)
+          #
+          # CATATAN: kalau urutan/jumlah prompt di run berikutnya ternyata beda
+          # (misal ada prompt provider tambahan), kirim log-nya lagi ya, supaya
+          # saya sesuaikan jawabannya.
+          printf '%s\n' \
+            "$WORK" \
+            "edge" \
+            "samsung" \
+            "a022f" \
+            "user" \
+            "" \
+            "${{ github.event.inputs.ui_interface }}" \
+            "" \
+            "" \
+            "pmos-a022f" \
+            "n" \
+            "n" \
+          | pmbootstrap -p "$APORTS" init
+
+          # Jaga-jaga: pastikan value kritis benar ke-set walau ada pergeseran prompt
+          pmbootstrap config device samsung-a022f
+          pmbootstrap config ui "${{ github.event.inputs.ui_interface }}"
+          pmbootstrap config hostname pmos-a022f
+          pmbootstrap config user user
+
+      - name: Build Rootfs & Boot Image
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+
+          # Build rootfs dan image sistem (password user default: 1234)
+          pmbootstrap install --password 1234 --cipher aes-xts-plain64
+
+          # Export hasil build ke folder sementara
+          pmbootstrap export /tmp/postmarketOS-export
+
+      - name: Compress System Images
+        id: compress
+        run: |
+          cd /tmp/postmarketOS-export
+
+          DATE_STR=$(TZ=Asia/Jakarta date +%Y%m%d-%H%M)
+          echo "date=$DATE_STR" >> $GITHUB_OUTPUT
+
+          # Buat archive zip agar hemat ukuran upload/download
+          zip -r9 ${{ github.workspace }}/pmOS-Samsung-A022F-rootfs-${DATE_STR}.zip ./*
+
+      - name: Upload Release Artifact
+        uses: ncipollo/release-action@v1.12.0
+        with:
+          artifacts: "${{ github.workspace }}/*.zip"
+          name: "pmOS Rootfs Image SM-A022F (${{ github.event.inputs.ui_interface }}) - ${{ steps.compress.outputs.date }}"
+          draft: false
+          prerelease: false
+          tag: "pmos-rootfs-${{ steps.compress.outputs.date }}"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ## postmarketOS System Image (Rootfs) Build
+            - **Target Device**: Samsung Galaxy A02 (SM-A022F)
+            - **Architecture**: `aarch64`
+            - **UI Selected**: `${{ github.event.inputs.ui_interface }}`
+            - **Default User Password**: `1234`
+
+            ### Isi File Zip:
+            - `samsung-a022f.img` (Rootfs / System Partition)
+            - `boot.img` (Kernel + pmOS Initramfs)
+
+      - name: Completion Info
+        run: |
+          echo "Build Rootfs Selesai!"
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/pmos-rootfs-${{ steps.compress.outputs.date }}"
