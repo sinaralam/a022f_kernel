@@ -123,20 +123,26 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           export WORK=/tmp/pmbootstrap
           export APORTS=$WORK/cache_git/pmaports
-          export UI="${{ github.event.inputs.ui_interface }}"
-
+          
           rm -f ~/.config/pmbootstrap.cfg
           
           cat << 'EOF' > /tmp/pmb_init.exp
           #!/usr/bin/expect -f
-          set timeout 60
+          set timeout 120
           spawn pmbootstrap init
           expect {
+            -re "Work path \\\[.*\\\]: *" { send "/tmp/pmbootstrap\r"; exp_continue }
+            -re "Channel \\\[.*\\\]: *" { send "edge\r"; exp_continue }
+            -re "Vendor \\\[.*\\\]: *" { send "samsung\r"; exp_continue }
+            -re "Device codename \\\[.*\\\]: *" { send "a022f\r"; exp_continue }
+            -re "User interface \\\[.*\\\]: *" { send "$env(UI)\r"; exp_continue }
             -re ".*: *" { send "\r"; exp_continue }
             eof
           }
           EOF
           chmod +x /tmp/pmb_init.exp
+          
+          export UI="${{ github.event.inputs.ui_interface }}"
           /tmp/pmb_init.exp || true
 
           pmbootstrap config work "$WORK"
