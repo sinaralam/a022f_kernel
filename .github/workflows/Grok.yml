@@ -121,7 +121,7 @@ jobs:
       - name: Configure pmbootstrap Non-Interactively
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          export WORK=/tmp/pmbootstrap
+          export WORK=/tmp/pmootstrap
           export APORTS=$WORK/cache_git/pmaports
           export NO_COLOR=1
           export PY_COLORS=0
