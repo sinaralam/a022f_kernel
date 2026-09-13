@@ -1,4 +1,4 @@
-name: Build postmarketOS Rootfs (aarch64)
+name: Build postmarketOS Rootfs (armv7)
 
 on:
   workflow_dispatch:
@@ -26,7 +26,7 @@ jobs:
       - name: Install pmbootstrap & Dependencies
         run: |
           sudo apt update
-          sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip
+          sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip expect
           pip3 install --user "git+https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
@@ -60,7 +60,7 @@ jobs:
           deviceinfo_codename="samsung-a022f"
           deviceinfo_year="2021"
           deviceinfo_chassis="handset"
-          deviceinfo_arch="aarch64"
+          deviceinfo_arch="armv7"
           deviceinfo_kernel_cmdline=""
           deviceinfo_generate_bootimg="true"
           deviceinfo_flash_offset_base="0x00000000"
@@ -77,7 +77,7 @@ jobs:
           pkgver=1
           pkgrel=0
           pkgdesc="Samsung Galaxy A02 (SM-A022F)"
-          arch="aarch64"
+          arch="armv7"
           url="https://postmarketos.org"
           license="MIT"
           depends="linux-samsung-a022f mkbootimg mesa-dri-swrast"
@@ -100,7 +100,7 @@ jobs:
           pkgver=1
           pkgrel=0
           pkgdesc="Samsung Galaxy A02 (SM-A022F) downstream kernel"
-          arch="aarch64"
+          arch="armv7"
           _flavor="samsung-a022f"
           url="https://postmarketos.org"
           license="GPL-2.0-only"
@@ -125,8 +125,21 @@ jobs:
           export APORTS=$WORK/cache_git/pmaports
           export UI="${{ github.event.inputs.ui_interface }}"
 
-          mkdir -p ~/.config
-          echo "[pmbootstrap]" > ~/.config/pmbootstrap.cfg
+          rm -f ~/.config/pmbootstrap.cfg
+          
+          # Gunakan expect yang menangkap semua jenis prompt berakhiran ":" atau "]"
+          # dan mengirim Enter untuk membangun config v3.11.1 yang bersih tanpa tersangkut.
+          cat << 'EOF' > /tmp/pmb_init.exp
+          #!/usr/bin/expect -f
+          set timeout 60
+          spawn pmbootstrap init
+          expect {
+            -re ".*: *" { send "\r"; exp_continue }
+            eof
+          }
+          EOF
+          chmod +x /tmp/pmb_init.exp
+          /tmp/pmb_init.exp || true
 
           pmbootstrap config work "$WORK"
           pmbootstrap config aports "$APORTS"
@@ -137,8 +150,8 @@ jobs:
           pmbootstrap config ui "$UI"
           pmbootstrap config hostname pmos-a022f
 
-          yes "" | pmbootstrap init || true
-
+          pmbootstrap checksum device-samsung-a022f
+          pmbootstrap checksum linux-samsung-a022f
           pmbootstrap status --details
 
       - name: Build Rootfs & Boot Image
@@ -170,6 +183,6 @@ jobs:
           body: |
             ## postmarketOS System Image (Rootfs) Build
             - **Target Device**: Samsung Galaxy A02 (SM-A022F)
-            - **Architecture**: `aarch64`
+            - **Architecture**: `armv7`
             - **UI Selected**: `${{ github.event.inputs.ui_interface }}`
             - **Default User Password**: `1234`
