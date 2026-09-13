@@ -6,11 +6,11 @@ on:
       ui_interface:
         description: 'Pilih User Interface (UI)'
         required: true
-        default: 'xfce4'
+        default: 'phosh'
         type: choice
         options:
-          - xfce4
           - phosh
+          - xfce4
           - plasma-mobile
           - console
 
@@ -26,21 +26,28 @@ jobs:
       - name: Install pmbootstrap & Dependencies
         run: |
           sudo apt update
-          sudo apt install -y python3-pip git procps sudo coreutils
-          pip3 install --user pmbootstrap
+          sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip
+
+          # Install pmbootstrap langsung dari repo Git resmi (Fix error PyPI yanked)
+          pip3 install --user git+https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git@master
+
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Verify Environment & Kernel File
         run: |
+          export PATH="$HOME/.local/bin:$PATH"
           pmbootstrap --version
+          
           if [ ! -f "${GITHUB_WORKSPACE}/boot.img-kernel" ]; then
             echo "Error: File boot.img-kernel tidak ditemukan di root repository!"
             exit 1
           fi
-          echo "boot.img-kernel ditemukan."
+          echo "boot.img-kernel ditemukan di root repository."
 
       - name: Configure pmbootstrap Project
         run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          
           # Inisialisasi konfigurasi dasar pmbootstrap untuk Samsung A02 (aarch64)
           pmbootstrap init \
             --work /tmp/pmbootstrap \
@@ -66,7 +73,9 @@ jobs:
 
       - name: Build Rootfs & Boot Image
         run: |
-          # Build rootfs dan image sistem (tanpa password root default: 1234)
+          export PATH="$HOME/.local/bin:$PATH"
+          
+          # Build rootfs dan image sistem (password user default: 1234)
           pmbootstrap install --password 1234 --cipher aes-xts-plain64
 
           # Export hasil build ke folder sementara
@@ -80,7 +89,7 @@ jobs:
           DATE_STR=$(TZ=Asia/Jakarta date +%Y%m%d-%H%M)
           echo "date=$DATE_STR" >> $GITHUB_OUTPUT
           
-          # Buat archive agar hemat ukuran upload/download
+          # Buat archive zip agar hemat ukuran upload/download
           zip -r9 ${{ github.workspace }}/pmOS-Samsung-A02-rootfs-${DATE_STR}.zip ./*
 
       - name: Upload Release Artifact
