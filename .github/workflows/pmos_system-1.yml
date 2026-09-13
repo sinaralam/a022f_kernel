@@ -1,0 +1,122 @@
+name: Build postmarketOS Rootfs (aarch64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ui_interface:
+        description: 'Pilih User Interface (UI)'
+        required: true
+        default: 'phosh'
+        type: choice
+        options:
+          - phosh
+          - xfce4
+          - plasma-mobile
+          - console
+
+jobs:
+  build-rootfs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install pmbootstrap & Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip
+
+          # Install pmbootstrap langsung dari repo Git resmi (Fix error PyPI yanked)
+          # NOTE: postmarketOS sudah rename default branch pmbootstrap dari "master" -> "main"
+          # (lihat: https://postmarketos.org/edge/2026/03/15/pmaports-default-branch-changed/)
+          # Tidak pakai suffix branch sama sekali supaya otomatis ikut default branch repo,
+          # jadi tidak gampang rusak lagi kalau nama default branch berubah lagi nanti.
+          pip3 install --user "git+https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git"
+
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Verify Environment & Kernel File
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          pmbootstrap --version
+
+          if [ ! -f "${GITHUB_WORKSPACE}/boot.img-kernel" ]; then
+            echo "Error: File boot.img-kernel tidak ditemukan di root repository!"
+            exit 1
+          fi
+          echo "boot.img-kernel ditemukan di root repository."
+
+      - name: Configure pmbootstrap Project
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+
+          # Inisialisasi konfigurasi dasar pmbootstrap untuk Samsung A02 (aarch64)
+          pmbootstrap init \
+            --work /tmp/pmbootstrap \
+            --aports /tmp/pmbootstrap/cache_git/pmaports \
+            --channel edge \
+            --vendor samsung \
+            --device a02 \
+            --architecture aarch64 \
+            --kernel downstream \
+            --user-ui ${{ github.event.inputs.ui_interface }} \
+            --hostname pmos-a02
+
+      - name: Inject Custom Kernel into Device Package
+        run: |
+          DEVICE_DIR="/tmp/pmbootstrap/cache_git/pmaports/device/testing/device-samsung-a02"
+
+          # Buat struktur device package jika belum ter-generate sempurna
+          mkdir -p $DEVICE_DIR
+
+          # Timpa/masukkan kernel lokal boot.img-kernel ke direktori build
+          cp ${GITHUB_WORKSPACE}/boot.img-kernel $DEVICE_DIR/boot.img-kernel
+          echo "Kernel lokal berhasil dimasukkan ke pmaports device samsung-a02."
+
+      - name: Build Rootfs & Boot Image
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+
+          # Build rootfs dan image sistem (password user default: 1234)
+          pmbootstrap install --password 1234 --cipher aes-xts-plain64
+
+          # Export hasil build ke folder sementara
+          pmbootstrap export /tmp/postmarketOS-export
+
+      - name: Compress System Images
+        id: compress
+        run: |
+          cd /tmp/postmarketOS-export
+
+          DATE_STR=$(TZ=Asia/Jakarta date +%Y%m%d-%H%M)
+          echo "date=$DATE_STR" >> $GITHUB_OUTPUT
+
+          # Buat archive zip agar hemat ukuran upload/download
+          zip -r9 ${{ github.workspace }}/pmOS-Samsung-A02-rootfs-${DATE_STR}.zip ./*
+
+      - name: Upload Release Artifact
+        uses: ncipollo/release-action@v1.12.0
+        with:
+          artifacts: "${{ github.workspace }}/*.zip"
+          name: "pmOS Rootfs Image SM-A022F (${{ github.event.inputs.ui_interface }}) - ${{ steps.compress.outputs.date }}"
+          draft: false
+          prerelease: false
+          tag: "pmos-rootfs-${{ steps.compress.outputs.date }}"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ## postmarketOS System Image (Rootfs) Build
+            - **Target Device**: Samsung Galaxy A02 (SM-A022F)
+            - **Architecture**: `aarch64`
+            - **UI Selected**: `${{ github.event.inputs.ui_interface }}`
+            - **Default User Password**: `1234`
+
+            ### Isi File Zip:
+            - `samsung-a02.img` (Rootfs / System Partition)
+            - `boot.img` (Kernel + pmOS Initramfs)
+
+      - name: Completion Info
+        run: |
+          echo "Build Rootfs Selesai!"
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/pmos-rootfs-${{ steps.compress.outputs.date }}"
