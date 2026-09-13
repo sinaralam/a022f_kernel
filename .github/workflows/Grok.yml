@@ -131,3 +131,65 @@ jobs:
           cat << 'EOF' > /tmp/pmb_init.exp
           #!/usr/bin/expect -f
           set timeout 120
+          spawn pmbootstrap init
+          expect {
+            -re "Work path \\[.*\\].*: *" { send "/tmp/pmbootstrap\r"; exp_continue }
+            -re "pmaports.* path \\[.*\\].*: *" { send "/tmp/pmbootstrap/cache_git/pmaports\r"; exp_continue }
+            -re "Channel \\[.*\\].*: *" { send "edge\r"; exp_continue }
+            -re "Vendor \\[.*\\].*: *" { send "samsung\r"; exp_continue }
+            -re "Device codename \\[.*\\].*: *" { send "a022f\r"; exp_continue }
+            -re "User interface \\[.*\\].*: *" { send "$env(UI)\r"; exp_continue }
+            -re ".*: *" { send "\r"; exp_continue }
+            eof
+          }
+          EOF
+          chmod +x /tmp/pmb_init.exp
+
+          export UI="${{ github.event.inputs.ui_interface }}"
+          /tmp/pmb_init.exp || true
+
+          pmbootstrap config work "$WORK"
+          pmbootstrap config aports "$APORTS"
+          pmbootstrap config channel edge
+          pmbootstrap config vendor samsung
+          pmbootstrap config device samsung-a022f
+          pmbootstrap config user user
+          pmbootstrap config ui "$UI"
+          pmbootstrap config hostname pmos-a022f
+
+          pmbootstrap checksum device-samsung-a022f
+          pmbootstrap checksum linux-samsung-a022f
+          pmbootstrap status --details
+
+      - name: Build Rootfs & Boot Image
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+
+          pmbootstrap install --password 1234 --cipher aes-xts-plain64
+          pmbootstrap export /tmp/postmarketOS-export
+
+      - name: Compress System Images
+        id: compress
+        run: |
+          cd /tmp/postmarketOS-export
+
+          DATE_STR=$(TZ=Asia/Jakarta date +%Y%m%d-%H%M)
+          echo "date=$DATE_STR" >> $GITHUB_OUTPUT
+
+          zip -r9 \( {{ github.workspace }}/pmOS-Samsung-A022F-rootfs- \){DATE_STR}.zip ./*
+
+      - name: Upload Release Artifact
+        uses: ncipollo/release-action@v1.12.0
+        with:
+          artifacts: "${{ github.workspace }}/*.zip"
+          name: "pmOS Rootfs Image SM-A022F (${{ github.event.inputs.ui_interface }}) - ${{ steps.compress.outputs.date }}"
+          draft: false
+          prerelease: false
+          tag: "pmos-rootfs-${{ steps.compress.outputs.date }}"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ## postmarketOS System Image (Rootfs) Build
+            - **Target Device**: Samsung Galaxy A02 (SM-A022F)
+            - **Architecture**: `aarch64`
+            - **UI Selected**: `${{ github.event.inputs.ui_interface }}`
+            - **Default User Password**: `1234`
