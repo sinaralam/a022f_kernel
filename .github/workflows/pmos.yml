@@ -1,0 +1,112 @@
+name: Build postmarketOS Kernel (aarch64)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  building-kernel:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Preparing Dependencies & Defconfig pmOS
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          sudo apt update
+          sudo apt install -y build-essential bc libssl-dev flex bison libncurses-dev libelf-dev zip
+
+          # Beri izin eksekusi ke script z64
+          chmod +x z64
+
+          # Auto-inject flag wajib postmarketOS ke a02_64_defconfig
+          DEFCONFIG_FILE="arch/arm64/configs/a02_64_defconfig"
+          if [ -f "$DEFCONFIG_FILE" ]; then
+            echo "Injecting pmOS mandatory defconfig flags..."
+            sed -i '/CONFIG_DEVTMPFS/d' $DEFCONFIG_FILE
+            sed -i '/CONFIG_NAMESPACES/d' $DEFCONFIG_FILE
+            sed -i '/CONFIG_CGROUPS/d' $DEFCONFIG_FILE
+            cat <<EOF >> $DEFCONFIG_FILE
+          CONFIG_CGROUPS=y
+          CONFIG_MEMCG=y
+          CONFIG_NAMESPACES=y
+          CONFIG_DEVTMPFS=y
+          CONFIG_DEVTMPFS_MOUNT=y
+          CONFIG_TMPFS=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_NET=y
+          CONFIG_UNIX98_PTYS=y
+          EOF
+          fi
+
+      - name: Setup Toolchains (aarch64 & arm)
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          
+          # Setup Toolchain aarch64 (sesuai script z64: toolchain/clang2)
+          mkdir -p toolchain/clang2
+          cd toolchain/clang2
+          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/android11-release.tar.gz
+          tar -xf android11-release.tar.gz && rm android11-release.tar.gz
+          
+          # Setup Toolchain 32-bit GCC (sesuai script z64: toolchain/gcc)
+          cd ${GITHUB_WORKSPACE}
+          mkdir -p toolchain/gcc
+          cd toolchain/gcc
+          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/heads/android11-release.tar.gz
+          tar -xf android11-release.tar.gz && rm android11-release.tar.gz
+
+      - name: Building Kernel with z64
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          export KBUILD_BUILD_USER="pmOS-Builder"
+          export KBUILD_BUILD_HOST="SM-A022F"
+          
+          # Eksekusi script z64 bawaan repo
+          ./z64
+
+      - name: Set Release Properties
+        id: props
+        run: |
+          echo "date=$(TZ=Asia/Jakarta date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+
+      - name: Package Kernel Artifacts
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          OUT_DIR="out/arch/arm64/boot"
+          
+          if [ -f "$OUT_DIR/Image.gz-dtb" ]; then
+            cd $OUT_DIR
+            DEVICE_NAME="SM-A022F-pmOS-Kernel-64bit"
+            
+            # Rename dan buat ZIP
+            cp Image.gz-dtb boot.img-kernel
+            zip -r9 ${DEVICE_NAME}-${{ steps.props.outputs.date }}.zip boot.img-kernel Image.gz-dtb
+            cp *.zip ${{ github.workspace }}/
+          else
+            echo "Error: Output $OUT_DIR/Image.gz-dtb tidak ditemukan! Periksa build.log"
+            exit 1
+          fi
+
+      - name: Upload Release Artifact
+        uses: ncipollo/release-action@v1.12.0
+        with:
+          artifacts: "${{ github.workspace }}/*.zip"
+          name: "pmOS Kernel 64-bit SM-A022F - ${{ steps.props.outputs.date }}"
+          draft: false
+          prerelease: false
+          tag: "pmos-kernel-${{ steps.props.outputs.date }}"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ## postmarketOS Kernel Build (v4.14.x)
+            - **Target Device**: Samsung Galaxy A02 (SM-A022F)
+            - **Defconfig**: `a02_64_defconfig`
+            - **Output Kernel**: `Image.gz-dtb` / `boot.img-kernel`
+            - Includes pmOS mandatory cgroups & devtmpfs flags.
+
+      - name: Completion Link
+        run: |
+          echo "Build Kernel Selesai!"
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/pmos-kernel-${{ steps.props.outputs.date }}"
