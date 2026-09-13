@@ -28,13 +28,8 @@ jobs:
           sudo apt update
           sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip
 
-          # Install pmbootstrap langsung dari repo Git resmi (Fix error PyPI yanked)
-          # NOTE: postmarketOS sudah rename default branch pmbootstrap dari "master" -> "main"
-          # (lihat: https://postmarketos.org/edge/2026/03/15/pmaports-default-branch-changed/)
-          # Tidak pakai suffix branch sama sekali supaya otomatis ikut default branch repo,
-          # jadi tidak gampang rusak lagi kalau nama default branch berubah lagi nanti.
+          # Install pmbootstrap dari repo Git resmi
           pip3 install --user "git+https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git"
-
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Verify Environment & Kernel File
@@ -58,25 +53,13 @@ jobs:
 
           mkdir -p "$WORK"
 
-          # samsung-a022f BELUM ada di pmaports resmi, jadi kita clone pmaports
-          # dulu secara manual, lalu suntikkan device package kita SENDIRI
-          # sebelum "pmbootstrap init" dijalankan. Dengan begitu pmbootstrap
-          # akan menganggap device ini sudah "ada" (bukan porting baru), dan
-          # wizard init jadi bisa dijawab otomatis (jumlah pertanyaan pasti/pendek).
-          # NOTE: pmaports default branch juga sudah di-rename master -> main
-          # (bareng dengan pmbootstrap, lihat catatan di step sebelumnya).
+          # Clone pmaports branch main
           git clone --depth 1 --branch main \
             https://gitlab.postmarketos.org/postmarketOS/pmaports.git "$APORTS"
 
-          # --- Device package (deviceinfo + APKBUILD referensi ke paket kernel) ---
-          # NOTE: heredoc di-pipe ke `sed` untuk membuang indentasi YAML,
-          # supaya isi file deviceinfo/APKBUILD rapi mulai dari kolom 0.
+          # --- Device package ---
           mkdir -p "$DEVICE_DIR"
           sed 's/^[[:space:]]*//' > "$DEVICE_DIR/deviceinfo" <<'EOF'
-          # TODO: nilai-nilai ini ASUMSI berbasis chipset MediaTek MT6765 &
-          # metode flash Samsung (Odin/Download Mode -> Heimdall). WAJIB
-          # dicek ulang (terutama nama partisi BOOT/SYSTEM) sebelum flash
-          # ke unit fisik.
           deviceinfo_format_version="2"
           deviceinfo_name="Samsung Galaxy A02"
           deviceinfo_manufacturer="Samsung"
@@ -90,15 +73,7 @@ jobs:
           deviceinfo_flash_pagesize="2048"
           deviceinfo_bootimg_qcdt="false"
           deviceinfo_bootimg_mtk_mkimage="true"
-          # Samsung pakai Odin/Download Mode -> di postmarketOS ini dihandle
-          # lewat protokol Heimdall (reverse-engineered dari Odin), bukan
-          # fastboot standar. "heimdall-bootimg" dipakai karena kita generate
-          # boot.img (deviceinfo_generate_bootimg=true di atas); kalau device
-          # kamu ternyata butuh flash kernel+initramfs terpisah (tanpa boot.img
-          # standar), gantinya "heimdall-isorec".
           deviceinfo_flash_method="heimdall-bootimg"
-          # TODO: konfirmasi nama partisi asli via `heimdall print-pit` di HP kamu.
-          # BOOT/SYSTEM ini nama umum di banyak device Samsung, tapi bisa beda.
           deviceinfo_flash_heimdall_partition_kernel="BOOT"
           deviceinfo_flash_heimdall_partition_system="SYSTEM"
           EOF
@@ -124,7 +99,7 @@ jobs:
           sha512sums="SKIP"
           EOF
 
-          # --- Kernel package: bungkus boot.img-kernel yang sudah jadi, tanpa compile ---
+          # --- Kernel package ---
           mkdir -p "$KDIR"
           cp "${GITHUB_WORKSPACE}/boot.img-kernel" "$KDIR/boot.img-kernel"
           sed 's/^[[:space:]]*//' > "$KDIR/APKBUILD" <<'EOF'
@@ -150,69 +125,38 @@ jobs:
           sha512sums="SKIP"
           EOF
 
-          echo "Device package samsung-a022f (deviceinfo + APKBUILD + kernel) berhasil disiapkan di pmaports lokal."
+          echo "Device package samsung-a022f berhasil disiapkan."
 
-      - name: Configure pmbootstrap Project
+      - name: Configure pmbootstrap Non-Interactively
         run: |
-          sudo apt install -y expect
           export PATH="$HOME/.local/bin:$PATH"
           export WORK=/tmp/pmbootstrap
           export APORTS=$WORK/cache_git/pmaports
           export UI="${{ github.event.inputs.ui_interface }}"
-          export HOSTNAME_VAL="pmos-a022f"
 
-          # pmbootstrap 3.x: "init" murni wizard interaktif, dan ternyata jumlah/urutan
-          # prompt-nya TIDAK sesederhana dugaan awal (ada prompt "pmaports path" terpisah,
-          # ada prompt "Install systemd?", jumlah prompt "Provider" bisa 0/lebih, dst).
-          # Jawab positional (printf) jadi rapuh karena satu prompt tak terduga bikin semua
-          # jawaban geser. Solusinya pakai `expect`: cocokkan berdasarkan TEKS pertanyaan,
-          # bukan urutan, jadi tahan terhadap prompt tambahan/hilang.
-          sed 's/^[[:space:]]*//' > /tmp/pmb_init.exp <<'EOF'
-          #!/usr/bin/expect -f
-          set timeout 300
-          spawn pmbootstrap -p $env(APORTS) init
-          expect {
-            -re {Work path.*:\s*$} { send "$env(WORK)\r"; exp_continue }
-            -re {pmaports path.*:\s*$} { send "\r"; exp_continue }
-            -re {Channel \[.*\]:\s*$} { send "edge\r"; exp_continue }
-            -re {Vendor \[.*\]:\s*$} { send "samsung\r"; exp_continue }
-            -re {Device codename.*:\s*$} { send "a022f\r"; exp_continue }
-            -re {create a new device port.*\(y/n\).*:\s*$} { send "n\r"; exp_continue }
-            -re {Username \[.*\]:\s*$} { send "user\r"; exp_continue }
-            -re {Provider \[.*\]:\s*$} { send "\r"; exp_continue }
-            -re {User interface \[.*\]:\s*$} { send "$env(UI)\r"; exp_continue }
-            -re {Install systemd.*:\s*$} { send "\r"; exp_continue }
-            -re {Extra packages \[.*\]:\s*$} { send "\r"; exp_continue }
-            -re {Locale \[.*\]:\s*$} { send "\r"; exp_continue }
-            -re {hostname.*\[.*\]:\s*$} { send "$env(HOSTNAME_VAL)\r"; exp_continue }
-            -re {copy these public keys.*\(y/n\).*:\s*$} { send "n\r"; exp_continue }
-            -re {Build outdated packages.*\(y/n\).*:\s*$} { send "n\r"; exp_continue }
-            -re {Zap existing chroots.*\(y/n\).*:\s*$} { send "n\r"; exp_continue }
-            eof
-          }
-          catch wait result
-          exit [lindex $result 3]
-          EOF
-
-          chmod +x /tmp/pmb_init.exp
-          /tmp/pmb_init.exp
-
-          # Jaga-jaga: pastikan value kritis benar walau ada pergeseran prompt yang tak terduga
-          pmbootstrap status --details || true
+          # Set konfigurasi via CLI tanpa butuh expect / wizard interaktif
+          pmbootstrap config work "$WORK"
+          pmbootstrap config aports "$APORTS"
+          pmbootstrap config channel edge
+          pmbootstrap config vendor samsung
           pmbootstrap config device samsung-a022f
-          pmbootstrap config ui "$UI"
-          pmbootstrap config hostname "$HOSTNAME_VAL"
           pmbootstrap config user user
+          pmbootstrap config ui "$UI"
+          pmbootstrap config hostname pmos-a022f
+
+          # Inisialisasi tanpa prompt
+          pmbootstrap init --no-prompt
+
           pmbootstrap status --details
 
       - name: Build Rootfs & Boot Image
         run: |
           export PATH="$HOME/.local/bin:$PATH"
 
-          # Build rootfs dan image sistem (password user default: 1234)
+          # Build rootfs dan image sistem
           pmbootstrap install --password 1234 --cipher aes-xts-plain64
 
-          # Export hasil build ke folder sementara
+          # Export hasil build
           pmbootstrap export /tmp/postmarketOS-export
 
       - name: Compress System Images
@@ -223,7 +167,6 @@ jobs:
           DATE_STR=$(TZ=Asia/Jakarta date +%Y%m%d-%H%M)
           echo "date=$DATE_STR" >> $GITHUB_OUTPUT
 
-          # Buat archive zip agar hemat ukuran upload/download
           zip -r9 ${{ github.workspace }}/pmOS-Samsung-A022F-rootfs-${DATE_STR}.zip ./*
 
       - name: Upload Release Artifact
