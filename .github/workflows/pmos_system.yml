@@ -27,8 +27,6 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip
-
-          # Install pmbootstrap dari repo Git resmi
           pip3 install --user "git+https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
@@ -41,7 +39,6 @@ jobs:
             echo "Error: File boot.img-kernel tidak ditemukan di root repository!"
             exit 1
           fi
-          echo "boot.img-kernel ditemukan di root repository."
 
       - name: Prepare Local pmaports + Custom Device Package
         run: |
@@ -52,12 +49,9 @@ jobs:
           KDIR=$APORTS/device/testing/linux-samsung-a022f
 
           mkdir -p "$WORK"
-
-          # Clone pmaports branch main
           git clone --depth 1 --branch main \
             https://gitlab.postmarketos.org/postmarketOS/pmaports.git "$APORTS"
 
-          # --- Device package ---
           mkdir -p "$DEVICE_DIR"
           sed 's/^[[:space:]]*//' > "$DEVICE_DIR/deviceinfo" <<'EOF'
           deviceinfo_format_version="2"
@@ -99,14 +93,13 @@ jobs:
           sha512sums="SKIP"
           EOF
 
-          # --- Kernel package ---
           mkdir -p "$KDIR"
           cp "${GITHUB_WORKSPACE}/boot.img-kernel" "$KDIR/boot.img-kernel"
           sed 's/^[[:space:]]*//' > "$KDIR/APKBUILD" <<'EOF'
           pkgname="linux-samsung-a022f"
           pkgver=1
           pkgrel=0
-          pkgdesc="Samsung Galaxy A02 (SM-A022F) downstream kernel (prebuilt binary)"
+          pkgdesc="Samsung Galaxy A02 (SM-A022F) downstream kernel"
           arch="aarch64"
           _flavor="samsung-a022f"
           url="https://postmarketos.org"
@@ -125,8 +118,6 @@ jobs:
           sha512sums="SKIP"
           EOF
 
-          echo "Device package samsung-a022f berhasil disiapkan."
-
       - name: Configure pmbootstrap Non-Interactively
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -134,7 +125,9 @@ jobs:
           export APORTS=$WORK/cache_git/pmaports
           export UI="${{ github.event.inputs.ui_interface }}"
 
-          # Set konfigurasi via CLI tanpa butuh expect / wizard interaktif
+          mkdir -p ~/.config
+          echo "[pmbootstrap]" > ~/.config/pmbootstrap.cfg
+
           pmbootstrap config work "$WORK"
           pmbootstrap config aports "$APORTS"
           pmbootstrap config channel edge
@@ -144,8 +137,7 @@ jobs:
           pmbootstrap config ui "$UI"
           pmbootstrap config hostname pmos-a022f
 
-          # Inisialisasi tanpa prompt
-          pmbootstrap init --no-prompt
+          yes "" | pmbootstrap init || true
 
           pmbootstrap status --details
 
@@ -153,10 +145,7 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
 
-          # Build rootfs dan image sistem
           pmbootstrap install --password 1234 --cipher aes-xts-plain64
-
-          # Export hasil build
           pmbootstrap export /tmp/postmarketOS-export
 
       - name: Compress System Images
@@ -184,12 +173,3 @@ jobs:
             - **Architecture**: `aarch64`
             - **UI Selected**: `${{ github.event.inputs.ui_interface }}`
             - **Default User Password**: `1234`
-
-            ### Isi File Zip:
-            - `samsung-a022f.img` (Rootfs / System Partition)
-            - `boot.img` (Kernel + pmOS Initramfs)
-
-      - name: Completion Info
-        run: |
-          echo "Build Rootfs Selesai!"
-          echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/pmos-rootfs-${{ steps.compress.outputs.date }}"
