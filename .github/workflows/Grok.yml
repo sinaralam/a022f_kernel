@@ -23,7 +23,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install pmbootstrap & Dependencies
+      - name: Install pmootstrap & Dependencies
         run: |
           sudo apt update
           sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip expect
