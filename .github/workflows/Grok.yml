@@ -23,7 +23,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install pmbootstrap & Dependencies
+      - name: Install pmootstrap & Dependencies
         run: |
           sudo apt update
           sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip expect
@@ -70,6 +70,7 @@ jobs:
           deviceinfo_flash_method="heimdall-bootimg"
           deviceinfo_flash_heimdall_partition_kernel="BOOT"
           deviceinfo_flash_heimdall_partition_system="SYSTEM"
+          deviceinfo_kconfig="CONFIG_MTK_PLATFORM=y\nCONFIG_MTK_MT6761=y"
           EOF
 
           cat > "$DEVICE_DIR/APKBUILD" <<'EOF'
@@ -121,7 +122,7 @@ jobs:
       - name: Configure pmbootstrap Non-Interactively
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          export WORK=/tmp/pmootstrap
+          export WORK=/tmp/pmbootstrap
           export APORTS=$WORK/cache_git/pmaports
           export NO_COLOR=1
           export PY_COLORS=0
