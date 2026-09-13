@@ -23,7 +23,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install pmootstrap & Dependencies
+      - name: Install pmbootstrap & Dependencies
         run: |
           sudo apt update
           sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip expect
@@ -121,7 +121,7 @@ jobs:
       - name: Configure pmbootstrap Non-Interactively
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          export WORK=/tmp/pmbootstrap
+          export WORK=/tmp/pmootstrap
           export APORTS=$WORK/cache_git/pmaports
           export NO_COLOR=1
           export PY_COLORS=0
