@@ -100,7 +100,7 @@ jobs:
           sed -i 's/^[[:space:]]*//' "$DEVICE_DIR/deviceinfo"
 
           cat > "$DEVICE_DIR/APKBUILD" <<'EOF'
-          # Maintainer: sinaralam
+          # Maintainer: sinaralam <sinaralam@users.noreply.github.com>
           pkgname="device-samsung-a022f"
           pkgdesc="Samsung Galaxy A02 (SM-A022F)"
           pkgver=1
@@ -129,7 +129,7 @@ jobs:
           mkdir -p "$KDIR"
           cp "${GITHUB_WORKSPACE}/boot.img-kernel" "$KDIR/boot.img-kernel"
           cat > "$KDIR/APKBUILD" <<'EOF'
-          # Maintainer: sinaralam
+          # Maintainer: sinaralam <sinaralam@users.noreply.github.com>
           pkgname="linux-samsung-a022f"
           pkgver=1
           pkgrel=0
