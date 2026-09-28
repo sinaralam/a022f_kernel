@@ -219,42 +219,70 @@ jobs:
           set -euo pipefail
           CHROOT="$WORK/chroot_rootfs_samsung-a022f"
           GEN="$CHROOT/boot/boot.img"
-          MKBOOT="$CHROOT/usr/share/android-tools/mkbootimg/mkbootimg.py"
           OUT=/tmp/postmarketOS-export
 
-          test -f "$GEN"    || { echo "boot.img hasil pmbootstrap tidak ketemu: $GEN"; exit 1; }
-          test -f "$MKBOOT" || { echo "mkbootimg.py tidak ketemu: $MKBOOT"; exit 1; }
+          test -f "$GEN" || { echo "boot.img hasil pmbootstrap tidak ketemu: $GEN"; exit 1; }
 
-          # Ambil initramfs (ramdisk) dari boot.img bawaan pmbootstrap
-          python3 - "$GEN" /tmp/ramdisk.gz <<'PY'
-          import struct, sys, math
-          d = open(sys.argv[1], 'rb').read()
+          # Pure-python: ambil ramdisk+cmdline dari boot.img pmbootstrap, lalu
+          # tulis boot.img header v2 (kernel stock + ramdisk pmOS + DTB stock).
+          python3 - "$GEN" "${GITHUB_WORKSPACE}/boot.img-kernel" "${GITHUB_WORKSPACE}/boot.img-dtb" /tmp/boot_a022f_armv7.img <<'PY'
+          import struct, sys, math, hashlib
+          gen, kpath, dpath, outp = sys.argv[1:5]
+
+          d = open(gen, 'rb').read()
           assert d[:8] == b'ANDROID!', d[:8]
           ksz, _, rsz, _, _, _, _, page = struct.unpack('<8I', d[8:40])
+          hver = struct.unpack('<I', d[40:44])[0]
+          gen_cmdline = d[64:576].split(b'\0')[0]
           roff = page + math.ceil(ksz / page) * page
-          rd = d[roff:roff + rsz]
-          assert len(rd) == rsz
-          open(sys.argv[2], 'wb').write(rd)
-          print("ramdisk:", rsz, "bytes")
-          PY
+          ramdisk = d[roff:roff + rsz]
+          assert len(ramdisk) == rsz
+          print("generated boot.img: header v%d, page %d, kernel %d, ramdisk %d" % (hver, page, ksz, rsz))
+          print("generated cmdline:", gen_cmdline.decode())
 
-          python3 "$MKBOOT" \
-            --kernel "${GITHUB_WORKSPACE}/boot.img-kernel" \
-            --dtb "${GITHUB_WORKSPACE}/boot.img-dtb" \
-            --ramdisk /tmp/ramdisk.gz \
-            --base 0x40000000 \
-            --kernel_offset 0x00008000 \
-            --ramdisk_offset 0x05000000 \
-            --second_offset 0xc0000000 \
-            --tags_offset 0x04000000 \
-            --dtb_offset 0x04000000 \
-            --pagesize 2048 \
-            --header_version 2 \
-            --board SRPTK19C003 \
-            --os_version 11.0.0 \
-            --os_patch_level 2022-02 \
-            --cmdline "bootopt=64S3,32S1,32S1" \
-            -o /tmp/boot_a022f_armv7.img
+          kernel = open(kpath, 'rb').read()
+          dtb = open(dpath, 'rb').read()
+
+          BASE = 0x40000000
+          PAGE = 2048
+          cmdline = b"bootopt=64S3,32S1,32S1"
+          board = b"SRPTK19C003"
+
+          def pad(b):
+              n = (-len(b)) % PAGE
+              return b + b'\0' * n
+
+          def m32(x):
+              return x & 0xffffffff
+
+          os_version = ((11 << 14) | (0 << 7) | 0) << 11 | ((2022 - 2000) << 4) | 2
+
+          h = hashlib.sha1()
+          for blob in (kernel, ramdisk, b''):
+              h.update(blob); h.update(struct.pack('<I', len(blob)))
+          h.update(struct.pack('<I', 0))   # recovery_dtbo size
+          h.update(dtb); h.update(struct.pack('<I', len(dtb)))
+          img_id = h.digest().ljust(32, b'\0')
+
+          hdr = b'ANDROID!'
+          hdr += struct.pack('<8I',
+                             len(kernel), m32(BASE + 0x00008000),
+                             len(ramdisk), m32(BASE + 0x05000000),
+                             0, m32(BASE + 0xc0000000),
+                             m32(BASE + 0x04000000), PAGE)
+          hdr += struct.pack('<2I', 2, os_version)
+          hdr += board.ljust(16, b'\0')
+          hdr += cmdline.ljust(512, b'\0')
+          hdr += img_id
+          hdr += b'\0' * 1024                       # extra_cmdline
+          hdr += struct.pack('<IQI', 0, 0, 1660)    # recovery_dtbo size/offset, header_size
+          hdr += struct.pack('<IQ', len(dtb), m32(BASE + 0x04000000))  # dtb size, dtb addr
+          assert len(hdr) == 1660, len(hdr)
+
+          out = pad(hdr) + pad(kernel) + pad(ramdisk) + pad(dtb)
+          open(outp, 'wb').write(out)
+          print("boot.img ditulis:", len(out), "bytes")
+          PY
 
           SIZE=$(stat -c %s /tmp/boot_a022f_armv7.img)
           echo "boot.img size: $SIZE (max $BOOT_PART_MAX)"
@@ -262,9 +290,11 @@ jobs:
             echo "Error: boot.img ($SIZE) lebih besar dari partisi boot ($BOOT_PART_MAX). JANGAN di-flash."
             exit 1
           fi
+          file /tmp/boot_a022f_armv7.img || true
 
           rm -f "$OUT/boot.img"
           cp /tmp/boot_a022f_armv7.img "$OUT/boot.img"
+          ls -laL "$OUT"
 
       - name: Compress System Images
         id: compress
