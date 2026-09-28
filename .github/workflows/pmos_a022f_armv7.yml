@@ -1,0 +1,264 @@
+name: Build postmarketOS Rootfs (armv7 / 32-bit) - Samsung A02
+
+# Taruh file ini di .github/workflows/pmos_a022f_armv7.yml
+#
+# File yang WAJIB ada di root repo (ambil dari stock boot.img A02 hasil
+# unpack AIK, folder split_img/):
+#   boot.img-kernel  -> kernel stock 32-bit (zImage)
+#   boot.img-dtb     -> DTB stock (header v2 stock A02 punya DTB terpisah)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ui_interface:
+        description: 'Pilih User Interface (UI)'
+        required: true
+        default: 'console'
+        type: choice
+        options:
+          - console
+          - xfce4
+          - phosh
+          - plasma-mobile
+
+env:
+  WORK: /tmp/pmbootstrap
+  PMB_CFG: /tmp/pmb.cfg
+  # Ukuran partisi boot A02 (mmcblk0p35) = 24 MiB
+  BOOT_PART_MAX: 25165824
+
+jobs:
+  build-rootfs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install pmbootstrap & Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y python3-pip python3-setuptools git procps sudo coreutils zip
+          pip3 install --user "git+https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Verify stock 32-bit kernel & DTB
+        run: |
+          set -euo pipefail
+          for f in boot.img-kernel boot.img-dtb; do
+            if [ ! -f "${GITHUB_WORKSPACE}/$f" ]; then
+              echo "Error: $f tidak ditemukan di root repository!"
+              exit 1
+            fi
+            ls -la "${GITHUB_WORKSPACE}/$f"
+            file "${GITHUB_WORKSPACE}/$f"
+          done
+          if file "${GITHUB_WORKSPACE}/boot.img-kernel" | grep -qi "ARM64"; then
+            echo "Error: boot.img-kernel ini kernel ARM64. Untuk build 32-bit harus kernel armv7 (zImage)."
+            exit 1
+          fi
+
+      - name: Prepare Local pmaports + Custom Device Package
+        run: |
+          set -euo pipefail
+          APORTS=$WORK/cache_git/pmaports
+          DEVICE_DIR=$APORTS/device/testing/device-samsung-a022f
+          KDIR=$APORTS/device/testing/linux-samsung-a022f
+
+          mkdir -p "$WORK"
+          git clone --depth 1 --branch main \
+            https://gitlab.postmarketos.org/postmarketOS/pmaports.git "$APORTS"
+
+          # ---------- device package ----------
+          mkdir -p "$DEVICE_DIR"
+          cat > "$DEVICE_DIR/deviceinfo" <<'EOF'
+          # Reference: <https://postmarketos.org/deviceinfo>
+          deviceinfo_format_version="0"
+          deviceinfo_name="Samsung Galaxy A02"
+          deviceinfo_manufacturer="Samsung"
+          deviceinfo_codename="samsung-a022f"
+          deviceinfo_year="2021"
+          deviceinfo_chassis="handset"
+          deviceinfo_arch="armv7"
+
+          # Layout mengikuti stock boot.img A02 (hasil AIK)
+          deviceinfo_kernel_cmdline="bootopt=64S3,32S1,32S1"
+          deviceinfo_generate_bootimg="true"
+          deviceinfo_flash_pagesize="2048"
+          deviceinfo_flash_offset_base="0x40000000"
+          deviceinfo_flash_offset_kernel="0x00008000"
+          deviceinfo_flash_offset_ramdisk="0x05000000"
+          deviceinfo_flash_offset_second="0xc0000000"
+          deviceinfo_flash_offset_tags="0x04000000"
+          deviceinfo_bootimg_qcdt="false"
+
+          deviceinfo_flash_method="heimdall-bootimg"
+          deviceinfo_flash_heimdall_partition_kernel="boot"
+          deviceinfo_flash_heimdall_partition_rootfs="userdata"
+          EOF
+          sed -i 's/^[[:space:]]*//' "$DEVICE_DIR/deviceinfo"
+
+          cat > "$DEVICE_DIR/APKBUILD" <<'EOF'
+          # Maintainer: sinaralam
+          pkgname="device-samsung-a022f"
+          pkgdesc="Samsung Galaxy A02 (SM-A022F)"
+          pkgver=1
+          pkgrel=0
+          url="https://postmarketos.org"
+          license="MIT"
+          arch="armv7"
+          options="!check !archcheck"
+          depends="postmarketos-base linux-samsung-a022f mkbootimg"
+          makedepends="devicepkg-dev"
+          source="deviceinfo"
+
+          build() {
+          	devicepkg_build $startdir $pkgname
+          }
+
+          package() {
+          	devicepkg_package $startdir $pkgname
+          }
+
+          sha512sums="SKIP"
+          EOF
+          # (tab di dalam fungsi dipertahankan, sed tidak dijalankan untuk APKBUILD)
+
+          # ---------- kernel package (prebuilt stock 32-bit) ----------
+          mkdir -p "$KDIR"
+          cp "${GITHUB_WORKSPACE}/boot.img-kernel" "$KDIR/boot.img-kernel"
+          cat > "$KDIR/APKBUILD" <<'EOF'
+          # Maintainer: sinaralam
+          pkgname="linux-samsung-a022f"
+          pkgver=1
+          pkgrel=0
+          pkgdesc="Samsung Galaxy A02 (SM-A022F) prebuilt stock 32-bit kernel"
+          arch="armv7"
+          _flavor="samsung-a022f"
+          url="https://postmarketos.org"
+          license="GPL-2.0-only"
+          options="!strip !check !tracedeps pmb:cross-native"
+          source="boot.img-kernel"
+
+          build() { :; }
+
+          package() {
+          	install -D "$srcdir"/boot.img-kernel "$pkgdir"/boot/vmlinuz-$_flavor
+          	mkdir -p "$pkgdir"/usr/share/kernel/$_flavor
+          	echo "$pkgver-postmarketOS" > "$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+          }
+
+          sha512sums="SKIP"
+          EOF
+
+      - name: Configure pmbootstrap (non-interactive, tanpa expect)
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          PMB="pmbootstrap --config $PMB_CFG"
+
+          # Config kosong dulu; nilai diisi lewat `pmbootstrap config`
+          mkdir -p "$(dirname "$PMB_CFG")"
+          printf '[pmbootstrap]\n' > "$PMB_CFG"
+
+          $PMB config work "$WORK"
+          $PMB config device samsung-a022f
+          $PMB config user user
+          $PMB config ui "${{ github.event.inputs.ui_interface }}"
+          $PMB config hostname pmos-a022f
+
+          $PMB checksum device-samsung-a022f
+          $PMB checksum linux-samsung-a022f
+          $PMB status --details
+
+      - name: Build Rootfs & Boot Image
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          PMB="pmbootstrap -y --config $PMB_CFG"
+
+          $PMB install --password 1234
+          $PMB export /tmp/postmarketOS-export
+          ls -laL /tmp/postmarketOS-export
+
+      - name: Repack boot.img (layout stock A02, header v2 + DTB terpisah)
+        run: |
+          set -euo pipefail
+          CHROOT="$WORK/chroot_rootfs_samsung-a022f"
+          GEN="$CHROOT/boot/boot.img"
+          MKBOOT="$CHROOT/usr/share/android-tools/mkbootimg/mkbootimg.py"
+          OUT=/tmp/postmarketOS-export
+
+          test -f "$GEN"    || { echo "boot.img hasil pmbootstrap tidak ketemu: $GEN"; exit 1; }
+          test -f "$MKBOOT" || { echo "mkbootimg.py tidak ketemu: $MKBOOT"; exit 1; }
+
+          # Ambil initramfs (ramdisk) dari boot.img bawaan pmbootstrap
+          python3 - "$GEN" /tmp/ramdisk.gz <<'PY'
+          import struct, sys, math
+          d = open(sys.argv[1], 'rb').read()
+          assert d[:8] == b'ANDROID!', d[:8]
+          ksz, _, rsz, _, _, _, _, page = struct.unpack('<8I', d[8:40])
+          roff = page + math.ceil(ksz / page) * page
+          rd = d[roff:roff + rsz]
+          assert len(rd) == rsz
+          open(sys.argv[2], 'wb').write(rd)
+          print("ramdisk:", rsz, "bytes")
+          PY
+
+          python3 "$MKBOOT" \
+            --kernel "${GITHUB_WORKSPACE}/boot.img-kernel" \
+            --dtb "${GITHUB_WORKSPACE}/boot.img-dtb" \
+            --ramdisk /tmp/ramdisk.gz \
+            --base 0x40000000 \
+            --kernel_offset 0x00008000 \
+            --ramdisk_offset 0x05000000 \
+            --second_offset 0xc0000000 \
+            --tags_offset 0x04000000 \
+            --dtb_offset 0x04000000 \
+            --pagesize 2048 \
+            --header_version 2 \
+            --board SRPTK19C003 \
+            --os_version 11.0.0 \
+            --os_patch_level 2022-02 \
+            --cmdline "bootopt=64S3,32S1,32S1" \
+            -o /tmp/boot_a022f_armv7.img
+
+          SIZE=$(stat -c %s /tmp/boot_a022f_armv7.img)
+          echo "boot.img size: $SIZE (max $BOOT_PART_MAX)"
+          if [ "$SIZE" -gt "$BOOT_PART_MAX" ]; then
+            echo "Error: boot.img ($SIZE) lebih besar dari partisi boot ($BOOT_PART_MAX). JANGAN di-flash."
+            exit 1
+          fi
+
+          rm -f "$OUT/boot.img"
+          cp /tmp/boot_a022f_armv7.img "$OUT/boot.img"
+
+      - name: Compress System Images
+        id: compress
+        run: |
+          cd /tmp/postmarketOS-export
+
+          DATE_STR=$(TZ=Asia/Jakarta date +%Y%m%d-%H%M)
+          echo "date=$DATE_STR" >> $GITHUB_OUTPUT
+
+          zip -r9 ${{ github.workspace }}/pmOS-Samsung-A022F-armv7-${DATE_STR}.zip ./*
+
+      - name: Upload Release Artifact
+        uses: ncipollo/release-action@v1.12.0
+        with:
+          artifacts: "${{ github.workspace }}/*.zip"
+          name: "pmOS armv7 Image SM-A022F (${{ github.event.inputs.ui_interface }}) - ${{ steps.compress.outputs.date }}"
+          draft: false
+          prerelease: false
+          tag: "pmos-armv7-${{ steps.compress.outputs.date }}"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ## postmarketOS armv7 (32-bit) build
+            - **Target Device**: Samsung Galaxy A02 (SM-A022F)
+            - **Architecture**: `armv7`
+            - **UI Selected**: `${{ github.event.inputs.ui_interface }}`
+            - **Default User Password**: `1234`
+            - `boot.img` -> partisi `boot` (max 24 MiB, sudah dicek di CI)
+            - rootfs image (`*-root.img`) -> partisi `userdata`
+            - Backup boot & userdata original sebelum flash.
