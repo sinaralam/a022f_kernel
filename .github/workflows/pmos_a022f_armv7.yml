@@ -138,8 +138,11 @@ jobs:
           _flavor="samsung-a022f"
           url="https://postmarketos.org"
           license="GPL-2.0-only"
-          options="!strip !check !tracedeps pmb:cross-native"
+          options="!strip !check !tracedeps !archcheck pmb:cross-native"
           source="boot.img-kernel"
+          builddir="$srcdir"
+
+          prepare() { :; }
 
           build() { :; }
 
@@ -192,9 +195,24 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           PMB="pmbootstrap -y --config $PMB_CFG"
 
-          $PMB install --password 1234
+          if ! $PMB install --password 1234; then
+            rc=$?
+            echo "=============== pmbootstrap log.txt (tail 300) ==============="
+            tail -n 300 "$WORK/log.txt" || true
+            echo "=============== APKBUILD kernel ==============="
+            cat "$WORK/cache_git/pmaports/device/testing/linux-samsung-a022f/APKBUILD" || true
+            exit $rc
+          fi
           $PMB export /tmp/postmarketOS-export
           ls -laL /tmp/postmarketOS-export
+
+      - name: Upload pmbootstrap log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmbootstrap-log
+          path: /tmp/pmbootstrap/log.txt
+          if-no-files-found: ignore
 
       - name: Repack boot.img (layout stock A02, header v2 + DTB terpisah)
         run: |
