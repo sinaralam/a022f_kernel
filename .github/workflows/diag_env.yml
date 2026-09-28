@@ -1,0 +1,288 @@
+name: Diagnose build environment (pmOS armv7 A02)
+
+# Simpan sebagai .github/workflows/diag_env.yml lalu "Run workflow".
+#
+# Beda dengan workflow build: script ini TIDAK berhenti di error pertama.
+# Semua tahap dijalankan berurutan, tiap tahap dicatat lulus/gagal, dan
+# seluruh log dikumpulkan jadi satu artifact (diag-logs) + tabel ringkasan.
+# Satu kali run = semua masalah keliatan sekaligus.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  D: /tmp/diag
+  CFG: /tmp/pmb.cfg
+  BOOT_PART_MAX: 25165824
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run all stages (tidak berhenti di error pertama)
+        shell: bash
+        run: |
+          set -uo pipefail   # tanpa -e, sengaja
+          mkdir -p "$D"
+          export PATH="$HOME/.local/bin:$PATH"
+          WORKD="$HOME/.local/var/pmbootstrap"
+          APORTS="$WORKD/cache_git/pmaports"
+          RESULTS="$D/results.tsv"; : > "$RESULTS"
+
+          PMB() { pmbootstrap -y --config "$CFG" "$@"; }
+
+          stage() {   # stage <nama> <fungsi>
+            local name="$1" fn="$2" rc
+            echo "::group::[$name]"
+            "$fn" 2>&1 | tee "$D/$name.log"
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            printf '%s\t%s\n' "$name" "$rc" >> "$RESULTS"
+            if [ "$rc" -eq 0 ]; then echo "=> $name: OK"; else echo "=> $name: GAGAL (rc=$rc)"; fi
+          }
+
+          # ------------------------------------------------------------------
+          s_env() {
+            echo "--- sistem";      uname -a; grep PRETTY /etc/os-release; nproc; free -h
+            echo "--- disk";        df -h / /tmp 2>&1
+            echo "--- tools";       python3 --version; git --version; file --version | head -1
+            echo "--- sudo";        sudo -n true && echo "sudo OK"
+            echo "--- loop devices"; ls -la /dev/loop* 2>&1 | head -12; sudo losetup -f
+            echo "--- binfmt_misc"; ls /proc/sys/fs/binfmt_misc 2>&1 | head -20
+            echo "--- qemu-user";   which qemu-arm-static qemu-aarch64-static 2>&1
+            echo "--- modul kernel"; lsmod | grep -E 'loop|binfmt|dm_mod|ext4' 2>&1
+            echo "--- jaringan"
+            curl -sI https://gitlab.postmarketos.org | head -1
+            curl -sI http://dl-cdn.alpinelinux.org/alpine/edge/main/x86_64/APKINDEX.tar.gz | head -1
+            echo "--- tes loop + partition scan (masalah yang kena di Codespaces)"
+            truncate -s 64M /tmp/t.img
+            printf 'label: gpt\n,32M\n,\n' | sudo sfdisk /tmp/t.img
+            L=$(sudo losetup -fP --show /tmp/t.img); echo "loop=$L"
+            ls -la ${L}* 2>&1
+            if ls ${L}p2 >/dev/null 2>&1; then echo "PARTITION NODE OK"; else echo "PARTITION NODE TIDAK MUNCUL"; fi
+            sudo losetup -d "$L"
+            return 0
+          }
+
+          s_deps() {
+            set -e
+            sudo apt-get update -qq
+            sudo apt-get install -y python3-pip python3-setuptools git procps sudo coreutils zip file
+            pip3 install --user "git+https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git"
+            pmbootstrap --version
+          }
+
+          s_introspect() {
+            pmbootstrap --version
+            pmbootstrap --help
+            for c in init install export config status checksum build bootimg_analyze deviceinfo_parse; do
+              echo; echo "===== pmbootstrap $c --help ====="
+              pmbootstrap "$c" --help 2>&1
+            done
+            PMDIR=$(python3 -c 'import pmb, os; print(os.path.dirname(pmb.__file__))')
+            echo; echo "PMDIR=$PMDIR"; ls "$PMDIR" "$PMDIR/config" 2>&1
+            for f in config/file.py config/__init__.py types.py; do
+              echo; echo "===== $f ====="; head -400 "$PMDIR/$f" 2>&1
+            done
+            echo; echo "===== referensi versi work folder ====="
+            grep -rn "work_migrate\|/version\|migrat" "$PMDIR" --include=*.py 2>&1 | head -30
+            return 0
+          }
+
+          # init ASLI dengan semua jawaban default -> ground truth format config,
+          # lokasi work/aports, dan file penanda versi.
+          s_init() {
+            rm -f "$CFG"
+            timeout 900 bash -c "yes '' | pmbootstrap --config '$CFG' init"
+            rc=$?
+            echo "init rc=$rc"
+            echo "===== isi $CFG ====="; cat "$CFG" 2>&1
+            echo "===== $WORKD ====="; ls -la "$WORKD" "$WORKD/cache_git" 2>&1
+            echo "version file: $(cat "$WORKD/version" 2>&1)"
+            return $rc
+          }
+
+          s_prepare() {
+            set -e
+            test -d "$APORTS" || { echo "pmaports tidak ada di $APORTS (init gagal?)"; return 1; }
+            DEVICE_DIR="$APORTS/device/testing/device-samsung-a022f"
+            KDIR="$APORTS/device/testing/linux-samsung-a022f"
+
+            if [ ! -f boot.img-kernel ]; then echo "PERINGATAN: boot.img-kernel tidak ada, pakai DUMMY"; head -c 1048576 /dev/urandom > boot.img-kernel; fi
+            if [ ! -f boot.img-dtb ];    then echo "PERINGATAN: boot.img-dtb tidak ada, pakai DUMMY";    head -c 65744   /dev/urandom > boot.img-dtb;    fi
+            file boot.img-kernel boot.img-dtb; ls -la boot.img-kernel boot.img-dtb
+
+            mkdir -p "$DEVICE_DIR"
+            cat > "$DEVICE_DIR/deviceinfo" <<'EOF'
+          deviceinfo_format_version="0"
+          deviceinfo_name="Samsung Galaxy A02"
+          deviceinfo_manufacturer="Samsung"
+          deviceinfo_codename="samsung-a022f"
+          deviceinfo_year="2021"
+          deviceinfo_chassis="handset"
+          deviceinfo_arch="armv7"
+          deviceinfo_kernel_cmdline="bootopt=64S3,32S1,32S1"
+          deviceinfo_generate_bootimg="true"
+          deviceinfo_flash_pagesize="2048"
+          deviceinfo_flash_offset_base="0x40000000"
+          deviceinfo_flash_offset_kernel="0x00008000"
+          deviceinfo_flash_offset_ramdisk="0x05000000"
+          deviceinfo_flash_offset_second="0xc0000000"
+          deviceinfo_flash_offset_tags="0x04000000"
+          deviceinfo_bootimg_qcdt="false"
+          deviceinfo_flash_method="heimdall-bootimg"
+          deviceinfo_flash_heimdall_partition_kernel="boot"
+          deviceinfo_flash_heimdall_partition_rootfs="userdata"
+          EOF
+            sed -i 's/^[[:space:]]*//' "$DEVICE_DIR/deviceinfo"
+
+            cat > "$DEVICE_DIR/APKBUILD" <<'EOF'
+          # Maintainer: sinaralam
+          pkgname="device-samsung-a022f"
+          pkgdesc="Samsung Galaxy A02 (SM-A022F)"
+          pkgver=1
+          pkgrel=0
+          url="https://postmarketos.org"
+          license="MIT"
+          arch="armv7"
+          options="!check !archcheck"
+          depends="postmarketos-base linux-samsung-a022f mkbootimg"
+          makedepends="devicepkg-dev"
+          source="deviceinfo"
+
+          build() {
+          	devicepkg_build $startdir $pkgname
+          }
+
+          package() {
+          	devicepkg_package $startdir $pkgname
+          }
+
+          sha512sums="SKIP"
+          EOF
+
+            mkdir -p "$KDIR"
+            cp boot.img-kernel "$KDIR/boot.img-kernel"
+            cat > "$KDIR/APKBUILD" <<'EOF'
+          # Maintainer: sinaralam
+          pkgname="linux-samsung-a022f"
+          pkgver=1
+          pkgrel=0
+          pkgdesc="Samsung Galaxy A02 (SM-A022F) prebuilt stock 32-bit kernel"
+          arch="armv7"
+          _flavor="samsung-a022f"
+          url="https://postmarketos.org"
+          license="GPL-2.0-only"
+          options="!strip !check !tracedeps pmb:cross-native"
+          source="boot.img-kernel"
+
+          build() { :; }
+
+          package() {
+          	install -D "$srcdir"/boot.img-kernel "$pkgdir"/boot/vmlinuz-$_flavor
+          	mkdir -p "$pkgdir"/usr/share/kernel/$_flavor
+          	echo "$pkgver-postmarketOS" > "$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+          }
+
+          sha512sums="SKIP"
+          EOF
+            ls -laR "$DEVICE_DIR" "$KDIR"
+          }
+
+          s_configure() {
+            set -e
+            PMB config device samsung-a022f
+            PMB config user user
+            PMB config ui console
+            PMB config hostname pmos-a022f
+            PMB checksum device-samsung-a022f
+            PMB checksum linux-samsung-a022f
+            PMB status
+            echo "===== isi $CFG sekarang ====="; cat "$CFG"
+            echo "===== deviceinfo_parse ====="; PMB deviceinfo_parse samsung-a022f 2>&1 || true
+          }
+
+          s_build_pkgs() {
+            set -e
+            PMB build device-samsung-a022f
+            PMB build linux-samsung-a022f
+          }
+
+          s_install() {
+            set -e
+            PMB install --password 1234
+            PMB export /tmp/postmarketOS-export
+            ls -laL /tmp/postmarketOS-export
+          }
+
+          s_repack() {
+            set -e
+            CHROOT="$WORKD/chroot_rootfs_samsung-a022f"
+            GEN="$CHROOT/boot/boot.img"
+            MKBOOT="$CHROOT/usr/share/android-tools/mkbootimg/mkbootimg.py"
+            test -f "$GEN"    || { echo "tidak ada: $GEN"; find "$WORKD" -name 'boot.img' 2>/dev/null; return 1; }
+            test -f "$MKBOOT" || { echo "tidak ada: $MKBOOT"; find "$WORKD" -name 'mkbootimg*' 2>/dev/null; return 1; }
+            python3 - "$GEN" /tmp/ramdisk.gz <<'PY'
+          import struct, sys, math
+          d = open(sys.argv[1], 'rb').read()
+          assert d[:8] == b'ANDROID!', d[:8]
+          ksz, _, rsz, _, _, _, _, page = struct.unpack('<8I', d[8:40])
+          roff = page + math.ceil(ksz / page) * page
+          rd = d[roff:roff + rsz]
+          assert len(rd) == rsz
+          open(sys.argv[2], 'wb').write(rd)
+          print("ramdisk:", rsz, "bytes")
+          PY
+            python3 "$MKBOOT" \
+              --kernel boot.img-kernel --dtb boot.img-dtb --ramdisk /tmp/ramdisk.gz \
+              --base 0x40000000 --kernel_offset 0x00008000 --ramdisk_offset 0x05000000 \
+              --second_offset 0xc0000000 --tags_offset 0x04000000 --dtb_offset 0x04000000 \
+              --pagesize 2048 --header_version 2 --board SRPTK19C003 \
+              --os_version 11.0.0 --os_patch_level 2022-02 \
+              --cmdline "bootopt=64S3,32S1,32S1" -o /tmp/boot_a022f_armv7.img
+            SIZE=$(stat -c %s /tmp/boot_a022f_armv7.img)
+            echo "boot.img size: $SIZE (max $BOOT_PART_MAX)"
+            [ "$SIZE" -le "$BOOT_PART_MAX" ] || { echo "KEGEDEAN untuk partisi boot"; return 1; }
+            PMB bootimg_analyze /tmp/boot_a022f_armv7.img 2>&1 || true
+          }
+
+          # ------------------------------------------------------------------
+          stage 01_env        s_env
+          stage 02_deps       s_deps
+          stage 03_introspect s_introspect
+          stage 04_init       s_init
+          stage 05_prepare    s_prepare
+          stage 06_configure  s_configure
+          stage 07_build_pkgs s_build_pkgs
+          stage 08_install    s_install
+          stage 09_repack     s_repack
+
+          cp "$WORKD/log.txt" "$D/pmbootstrap-log.txt" 2>/dev/null || true
+
+          echo; echo "================ RINGKASAN ================"
+          {
+            echo "## Hasil diagnosa"
+            echo "| Tahap | Hasil |"
+            echo "|---|---|"
+          } > "$D/summary.md"
+          FAIL=0
+          while IFS=$'\t' read -r n rc; do
+            if [ "$rc" -eq 0 ]; then r="OK"; else r="GAGAL (rc=$rc)"; FAIL=1; fi
+            printf '%-14s %s\n' "$n" "$r"
+            echo "| $n | $r |" >> "$D/summary.md"
+          done < "$RESULTS"
+          cat "$D/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-logs
+          path: /tmp/diag
