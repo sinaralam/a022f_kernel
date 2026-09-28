@@ -184,7 +184,7 @@ jobs:
 
           $PMB checksum device-samsung-a022f
           $PMB checksum linux-samsung-a022f
-          $PMB status --details
+          $PMB status || true
 
       - name: Build Rootfs & Boot Image
         run: |
