@@ -164,6 +164,12 @@ jobs:
           printf '[pmbootstrap]\nwork = %s\n' "$WORK" > "$PMB_CFG"
           cat "$PMB_CFG"
 
+          # Work folder butuh file penanda versi (biasanya dibuat oleh `pmbootstrap init`).
+          # Versi diambil dari pesan migrasi pmbootstrap sendiri; fallback ke 8.
+          WORK_VER=$($PMB status 2>&1 | grep -oP 'to \K[0-9]+' | head -1) || true
+          echo "${WORK_VER:-8}" > "$WORK/version"
+          echo "work folder version: $(cat "$WORK/version")"
+
           $PMB config device samsung-a022f
           $PMB config user user
           $PMB config ui "${{ github.event.inputs.ui_interface }}"
