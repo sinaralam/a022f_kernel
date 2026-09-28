@@ -158,11 +158,12 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           PMB="pmbootstrap --config $PMB_CFG"
 
-          # Config kosong dulu; nilai diisi lewat `pmbootstrap config`
-          mkdir -p "$(dirname "$PMB_CFG")"
-          printf '[pmbootstrap]\n' > "$PMB_CFG"
+          # `work` HARUS sudah ada di file config sebelum pmbootstrap dijalankan:
+          # pmbootstrap ngecek work path saat startup, jadi `config work` terlambat.
+          mkdir -p "$(dirname "$PMB_CFG")" "$WORK"
+          printf '[pmbootstrap]\nwork = %s\n' "$WORK" > "$PMB_CFG"
+          cat "$PMB_CFG"
 
-          $PMB config work "$WORK"
           $PMB config device samsung-a022f
           $PMB config user user
           $PMB config ui "${{ github.event.inputs.ui_interface }}"
