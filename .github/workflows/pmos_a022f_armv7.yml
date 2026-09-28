@@ -170,6 +170,13 @@ jobs:
           echo "${WORK_VER:-8}" > "$WORK/version"
           echo "work folder version: $(cat "$WORK/version")"
 
+          # pmbootstrap menghitung lokasi pmaports dari path work BAWAAN
+          # (~/.local/var/pmbootstrap), bukan dari `work` di config kita.
+          # Arahkan lokasi bawaan itu ke clone pmaports di $WORK.
+          mkdir -p "$HOME/.local/var/pmbootstrap/cache_git"
+          ln -sfn "$WORK/cache_git/pmaports" "$HOME/.local/var/pmbootstrap/cache_git/pmaports"
+          ls -la "$HOME/.local/var/pmbootstrap/cache_git/"
+
           $PMB config device samsung-a022f
           $PMB config user user
           $PMB config ui "${{ github.event.inputs.ui_interface }}"
